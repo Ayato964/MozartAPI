@@ -6,9 +6,12 @@ from pydantic import BaseModel
 
 class GenerateMeta(BaseModel):
     model_type: str
-    program: List[int]
+    program: List[str]
     tempo: int
     task: str
+    key: str
+
+    num_gems: Optional[int] = 1
     p: Optional[float] = 0.95
     temperature: Optional[float] = 1.0
     chord_item: Optional[List[str]] = None

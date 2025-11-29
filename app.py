@@ -3,16 +3,32 @@ import json
 from datetime import datetime
 
 from fastapi import Form
+from fastapi.middleware.cors import CORSMiddleware
 from pathlib import Path
 import io, os, uuid, mido
 
 from fastapi import FastAPI, File, UploadFile
 from fastapi.responses import JSONResponse, FileResponse
 from pydantic import ValidationError
-from mortm.utils.generate import *
+from rapper import GenerateMeta
 from model import *
 
 app = FastAPI()
+origins = [
+    "http://localhost",
+    "http://localhost:3000", # ローカルでの開発用フロントエンドなど
+    "http://localhost:8080", # ローカルでの開発用フロントエンドなど
+    "https://ayato964.github.io", # あなたのGitHub PagesのURL
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins, # 開発中は "*" ですべて許可するのが簡単。本番では上記のように具体的に指定します。
+    allow_credentials=True,
+    allow_methods=["*"], # "POST", "GET" など、許可するHTTPメソッド
+    allow_headers=["*"], # 許可するHTTPヘッダー
+)
+
 CONTROLLER: Optional[ModelController] = None
 ROOT_SAVE_DIR = Path("data/saves")
 
@@ -21,7 +37,7 @@ ROOT_SAVE_DIR = Path("data/saves")
 @app.post("/model_info")
 async def model_info():
     return JSONResponse(CONTROLLER.meta)
-
+    
 
 @app.post("/generate")
 async def generate(
@@ -32,7 +48,7 @@ async def generate(
     allowed_midi_types = {"audio/midi", "audio/x-midi", "application/x-midi", "application/octet-stream"}
     if midi.content_type not in allowed_midi_types:
         return JSONResponse({"error": "MIDIファイルをアップロードしてください"}, status_code=400)
-
+    
     if meta_json.content_type not in {"application/json"}:
         return JSONResponse({"error": "meta_jsonはJSONファイルをアップロードしてください"}, status_code=400)
 
@@ -42,13 +58,12 @@ async def generate(
             json_content = await meta_json.read()
             meta = GenerateMeta.model_validate(json.loads(json_content))
         except (ValidationError, json.JSONDecodeError) as e:
-            # バリデーションエラーの場合、FastAPIは通常422を返します
             return JSONResponse(
                 content={"error": "無効な'meta_json'形式です。", "details": json.loads(e.json()) if isinstance(e, ValidationError) else str(e)},
                 status_code=422,
             )
 
-        # 2. MIDIファイルの読み込みと保存 (pathlibに統一)
+        # 2. MIDIファイルの読み込みと保存
         raw = await midi.read()
         midi_obj = mido.MidiFile(file=io.BytesIO(raw))
 
@@ -67,7 +82,7 @@ async def generate(
 
         # 3. Controllerのgenerateを呼び出し、結果のファイルパスを取得
         result = await CONTROLLER.generate(meta.model_type, str(midi_file_path), meta, save_path)
-        
+
         output_file_path = result.get("output_file")
 
         # 4. ファイルパスの存在を確認
@@ -79,7 +94,9 @@ async def generate(
 
         # 5. 拡張子に応じてmedia_typeを決定し、FileResponseとして返す
         file_extension = os.path.splitext(output_file_path)[1].lower()
-        if file_extension == ".mid":
+        if file_extension == ".zip":
+            media_type = "application/zip"
+        elif file_extension == ".mid":
             media_type = "audio/midi"
         elif file_extension == ".txt":
             media_type = "text/plain"

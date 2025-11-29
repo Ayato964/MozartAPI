@@ -58,15 +58,40 @@ data/
 -   **Method**: `POST`
 -   **Response**:
     ```json
-    {
       "0": {
         "model_name": "MORTM4.1-SAX",
         "description": "Alto Saxophone model",
+        "tag": {
+          "instrument": "sax",
+          "model": "pretrained",
+          "type": "mortm",
+          "version": "4.1"
+        },
+        "rule": {
+          "input_midi": false,
+          "multi_instrument": false,
+          "temperature": true,
+          "top_p": true,
+          "number_of_generation": true
+        },
         "model_folder_path": "/path/to/data/models/MORTM4.1-SAX"
       },
       "1": {
         "model_name": "MORTM4.1Pro-SAX",
         "description": "Professional Alto Saxophone model",
+        "tag": {
+          "instrument": "sax",
+          "model": "sft",
+          "type": "mortm",
+          "version": "4.1"
+        },
+        "rule": {
+          "input_midi": true,
+          "multi_instrument": true,
+          "temperature": true,
+          "top_p": true,
+          "number_of_generation": true
+        },
         "model_folder_path": "/path/to/data/models/MORTM4.1Pro-SAX"
       }
     }
@@ -92,6 +117,7 @@ data/
 | `program`         | `List[int]`    | MIDIのプログラムチェンジ番号。                 | **必須**     |
 | `tempo`           | `int`          | 生成するMIDIのテンポ (BPM)。                   | **必須**     |
 | `task`            | `string`       | モデルに与えるタスク。                         | **必須**     |
+| `num_gems`        | `int`          | 生成する数。                                   | `1`          |
 | `p`               | `float`        | Nucleus samplingのp値。                        | `0.95`       |
 | `temperature`     | `float`        | 生成の多様性を制御する温度。                   | `1.0`        |
 | `chord_item`      | `List[string]` | (任意) コード進行のリスト。                    | `None`       |
