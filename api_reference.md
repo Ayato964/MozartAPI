@@ -6,10 +6,8 @@ This document describes the available endpoints and parameters for the MORTM API
 
 Returns metadata for a specific model.
 
-- **URL**: `/model-info/{model_name}`
+- **URL**: `/model-info/`
 - **Method**: `GET`
-- **Path Parameters**:
-  - `model_name` (string): The unique identifier of the model.
 - **Response**: `application/json`
   - Success: `{"model_name": "...", "tag": {...}, ...}`
   - Error: `{"error": "Model not found"}`
