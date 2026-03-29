@@ -1,0 +1,23 @@
+{
+  "model_name": "MORTM4.5-Generation-Preview2",
+  "description": "ピアノやサックスを入力して、多様なスタイルで続きを生成します。キーやテンポの変更も可能です。\n MORTM4.5-Pro-Preview2をベースに、生成タスクに特化したモデルです。",
+  "tag": {
+    "instruments":[ "PIANO", "SAX"],
+    "model": "generation",
+    "type": "mortm",
+    "version": "4.5"
+  },
+  "rule": {
+    "input_midi": true,
+    "multi_instrument": true,
+    "temperature": true,
+    "top_p": true,
+    "number_of_generation": true,
+    "send_context_past": true,
+    "send_context_condition": true,
+    "send_context_future": true,
+    "send_chord_progression": false,
+    "gen_measure_count": true,
+    "gen_note_dense": false
+  }
+}

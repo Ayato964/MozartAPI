@@ -29,19 +29,7 @@ def make_system_prompt(tokenizer, key, program, call_function = None):
     prompt.append(tokenizer.get("<TAG_END>"))
     return np.array(prompt)
 
-def make_system_prompt_foundation(tokenizer: Tokenizer, meta: GenerateMeta):
-    prompt = [tokenizer.get("<EOS>"),
-              tokenizer.get("<SYSTEM>")]
-
-    for p in meta.program:
-        prompt.append(tokenizer.get(f"<INST_{p}>"))
-        prompt.append(tokenizer.get(f"<NOTE_DENSE_{meta.gen_note_dense[p]}>"))
-    prompt.append(tokenizer.get(f"<GEN_MEASURE_COUNT_{meta.genfield_measure}>"))
-    prompt.append(tokenizer.get(f"k_{meta.key}"))
-    prompt.append(tokenizer.get("<TAG_END>"))
-    return np.array(prompt)
-
-class MORTM45Rapper(AbstractModelRapper):
+class MORTM46Rapper(AbstractModelRapper):
 
     """MORTMモデル用の具体的な処理を実装したクラス (Concrete Strategy)"""
     def _load_model(self):
@@ -49,7 +37,7 @@ class MORTM45Rapper(AbstractModelRapper):
         config_path = os.path.join(model_path, "config.json")
         model_pth_path = os.path.join(model_path, "model.pth")
 
-        print(f"Loading model: {self.meta['model_name']} from {model_path}")
+        print(f"Loading model: {self.meta['model_name']} from {model_path}!!!!!")
         args = MORTMArgs(config_path)
         progress = _DefaultLearningProgress()
         model: MORTM = MORTM(args, progress).to(progress.get_device())
@@ -60,34 +48,14 @@ class MORTM45Rapper(AbstractModelRapper):
     def preprocessing(self, past_midi, const_midi, future_midi, meta: GenerateMeta):
 
         if self.meta["tag"]["model"] == "pretrained":
-            tokenizer = Tokenizer(get_token_converter_pro(TO_TOKEN))
+            tokenizer = Tokenizer(get_token_converter_pro2(TO_TOKEN))
             seq = []
             print(meta.num_gems)
             for _ in range(meta.num_gems):
-                if self.meta["tag"]["version"] == "4.5D" or self.meta["tag"]["version"] == "4.5E":
-                    prompt = make_system_prompt_foundation(tokenizer, meta)
-                else:
-                    prompt = make_system_prompt(tokenizer, meta.key, meta.program)
-
+                prompt = make_system_prompt(tokenizer, meta.key, meta.program)
                 prompt = np.concatenate([prompt, np.array([tokenizer.get("<MGEN>")])])
-
-                if meta.ai_continue_mode:
-                    print("----AI CONTINUE MODE----")
-                    past = MIDIConverter(tokenizer, os.path.dirname(past_midi), os.path.basename(past_midi), program_list=meta.program, key=meta.key)
-                    past()
-                    node_dict = past.midi2seq.aya_node
-                    past_seq = []
-                    for program, inst in node_dict.items():
-                        print(inst)
-                        past_seq.append(tokenizer.get(f"<INST_{program}>"))
-                        past_seq.extend(inst[:-1])
-                    prompt = np.concatenate([prompt, np.array(past_seq)])
-
-
                 seq.append(prompt)
-
             return {"meta": meta, "sequence": np.array(seq), "tokenizer": tokenizer}
-
         elif self.meta["tag"]["model"] == "generation":
             def call(p: list):
                 p.append(tokenizer.get(f"<GEN_MEASURE_COUNT_{min(meta.genfield_measure, 8)}>"))
@@ -137,7 +105,6 @@ class MORTM45Rapper(AbstractModelRapper):
 
             return {"meta": meta, "sequence": seq, "tokenizer": tokenizer}
 
-
     def get_context(self, tokenizer: Tokenizer, node_dict: dict, key_token: str):
         past_seq = [tokenizer.get(key_token)]
         for program, inst in node_dict.items():
@@ -152,12 +119,12 @@ class MORTM45Rapper(AbstractModelRapper):
         meta: GenerateMeta = kwargs['meta']
         if self.meta["tag"]["model"] == "pretrained":
             np_all, pack = self.model.top_sampling_measure_kv_cache(tokenizer=kwargs["tokenizer"], src=kwargs["sequence"],
-                                                     p=meta.p, temperature=meta.temperature)
+                                                                    p=meta.p, temperature=meta.temperature)
             return {"meta": kwargs['meta'], "tokenizer": kwargs['tokenizer'], "sequence": pack}
 
         if self.meta["tag"]["model"] == "generation":
             np_all, pack = self.model.top_sampling_measure_kv_cache(tokenizer=kwargs["tokenizer"], src=pad_sequence(kwargs["sequence"], batch_first=True),
-                                                     p=meta.p, temperature=meta.temperature)
+                                                                    p=meta.p, temperature=meta.temperature)
 
             return {"meta": kwargs['meta'], "tokenizer": kwargs['tokenizer'], "sequence": pack}
 

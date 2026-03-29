@@ -1,2 +1,7 @@
-./data/models/MORTM45_Flash/model.pth
 
+*.pth
+__pycache__/
+*.pyc
+.idea/
+.venv
+/flash-attention/

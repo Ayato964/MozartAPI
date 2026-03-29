@@ -16,7 +16,7 @@ except ImportError:
 
 from rapper import *
 from models.mortm.mortm45 import MORTM45Rapper
-
+from models.mortm.mortm46 import MORTM46Rapper
 # --- Controller ---
 class ModelController:
     def __init__(self, vram_threshold=0.85, cache_size=10):
@@ -50,7 +50,13 @@ class ModelController:
             pynvml.nvmlShutdown()
 
     def _register_rappers(self):
-        self.rapper_factory.register_rapper("MORTM4.5-Flash", MORTM45Rapper)
+        self.rapper_factory.register_rapper("MORTM4.5-Flash-Preview", MORTM45Rapper)
+        self.rapper_factory.register_rapper("MORTM4.5-Pro-Preview", MORTM45Rapper)
+        self.rapper_factory.register_rapper("MORTM4.5-Flash-Preview2", MORTM45Rapper)
+        self.rapper_factory.register_rapper("MORTM4.5-Pro-Preview2", MORTM45Rapper)
+        self.rapper_factory.register_rapper("MORTM4.5D-Lite", MORTM45Rapper)
+        self.rapper_factory.register_rapper("MORTM4.5-Generation-Preview2", MORTM45Rapper)
+        self.rapper_factory.register_rapper("MORTM4.5-OMEGA-Preview", MORTM45Rapper)
 
     def _scan_model_folders(self, base_dir="data/models"):
         if not os.path.isdir(base_dir):
@@ -105,12 +111,11 @@ class ModelController:
         except Exception as e:
             print(f"Error during VRAM management: {e}")
 
-    async def generate(self, model_type, midi_path: str, meta: GenerateMeta, save_directory):
+    async def generate(self, model_type, past_midi_path: str, const_midi_path: str, future_midi_path: str, meta: GenerateMeta, save_directory):
         if model_type not in self.available_models:
             raise ValueError(f"指定されたモデル({model_type})は存在しません")
 
         self._check_and_manage_vram()
-
         if model_type in self.loaded_rappers:
             rapper = self.loaded_rappers[model_type]
             lock = self.model_locks[model_type]
@@ -127,7 +132,7 @@ class ModelController:
 
         final_output_path = None
         async with lock:
-            kwargs = rapper.preprocessing(midi_path, meta)
+            kwargs = rapper.preprocessing(past_midi_path, const_midi_path, future_midi_path, meta)
             generated_data_kwargs = rapper.generate(**kwargs)
             output_paths = rapper.postprocessing(save_directory, **generated_data_kwargs)
 

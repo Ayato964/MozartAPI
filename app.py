@@ -33,6 +33,14 @@ CONTROLLER: Optional[ModelController] = None
 ROOT_SAVE_DIR = Path("data/saves")
 
 
+async def midi_save(base: UploadFile, save_path: Path, save_name: str):
+    # 2. MIDIファイルの読み込みと保存
+    raw = await base.read()
+    midi_obj = mido.MidiFile(file=io.BytesIO(raw))
+
+    midi_file_path = os.path.join(save_path, save_name)
+    midi_obj.save(midi_file_path)
+    return midi_file_path
 
 @app.post("/model_info")
 async def model_info():
@@ -41,13 +49,23 @@ async def model_info():
 
 @app.post("/generate")
 async def generate(
-    midi: UploadFile = File(...),
+    past_midi: Optional[UploadFile] = None,
+    conditions_midi: Optional[UploadFile] = None,
+    future_midi: Optional[UploadFile] = None,
     meta_json: UploadFile = File(...),
 
 ):
+    print(f"Input: {past_midi is not None}, {conditions_midi is not None}, {future_midi is not None}, {meta_json.filename}")
     allowed_midi_types = {"audio/midi", "audio/x-midi", "application/x-midi", "application/octet-stream"}
-    if midi.content_type not in allowed_midi_types:
-        return JSONResponse({"error": "MIDIファイルをアップロードしてください"}, status_code=400)
+    if past_midi is not None:
+        if past_midi.content_type not in allowed_midi_types:
+            return JSONResponse({"error": "MIDIファイルをアップロードしてください"}, status_code=400)
+    if conditions_midi is not None:
+        if conditions_midi.content_type not in allowed_midi_types:
+            return JSONResponse({"error": "conditions_midiはMIDIファイルをアップロードしてください"}, status_code=400)
+    if future_midi is not None:
+        if future_midi.content_type not in allowed_midi_types:
+            return JSONResponse({"error": "future_midiはMIDIファイルをアップロードしてください"}, status_code=400)
     
     if meta_json.content_type not in {"application/json"}:
         return JSONResponse({"error": "meta_jsonはJSONファイルをアップロードしてください"}, status_code=400)
@@ -63,10 +81,7 @@ async def generate(
                 status_code=422,
             )
 
-        # 2. MIDIファイルの読み込みと保存
-        raw = await midi.read()
-        midi_obj = mido.MidiFile(file=io.BytesIO(raw))
-
+        # 2. アップロードされたMIDIファイルを一時保存
         ROOT_SAVE_DIR.mkdir(parents=True, exist_ok=True)
 
         today = datetime.now().strftime("%Y%m%d")
@@ -74,14 +89,26 @@ async def generate(
         save_path = ROOT_SAVE_DIR / today / hash_id
         save_path.mkdir(parents=True, exist_ok=True)
 
-        midi_file_path = save_path / "input.mid"
-        midi_obj.save(midi_file_path)
+        if past_midi is not None:
+            past_midi_path = await midi_save(past_midi, save_path, "past.mid")
+        else:
+            past_midi_path = None
+
+        if conditions_midi is not None:
+            conditions_midi_path = await midi_save(conditions_midi, save_path, "cond.mid")
+        else:
+            conditions_midi_path = None
+
+        if future_midi is not None:
+            future_midi_path = await midi_save(future_midi, save_path, "future.mid")
+        else:
+            future_midi_path = None
 
         if CONTROLLER is None:
             return JSONResponse({"error": "モデルが初期化されていません"}, status_code=500)
 
         # 3. Controllerのgenerateを呼び出し、結果のファイルパスを取得
-        result = await CONTROLLER.generate(meta.model_type, str(midi_file_path), meta, save_path)
+        result = await CONTROLLER.generate(meta.model_type, past_midi_path, conditions_midi_path, future_midi_path, meta, save_path)
 
         output_file_path = result.get("output_file")
 
