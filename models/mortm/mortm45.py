@@ -23,9 +23,13 @@ def make_system_prompt(tokenizer, key, program, call_function = None):
 
     for p in program:
         prompt.append(tokenizer.get(f"<INST_{p}>"))
+        
     if call_function is not None:
         call_function(prompt)
-    prompt.append(tokenizer.get(f"k_{key}"))
+        
+    if key:
+        prompt.append(tokenizer.get(f"k_{key}"))
+        
     prompt.append(tokenizer.get("<TAG_END>"))
     return np.array(prompt)
 
@@ -36,10 +40,16 @@ def make_system_prompt_foundation(tokenizer: Tokenizer, meta: GenerateMeta, incl
     for p in meta.program:
         prompt.append(tokenizer.get(f"<INST_{p}>"))
         if include_dense:
-            prompt.append(tokenizer.get(f"<NOTE_DENSE_{meta.gen_note_dense[p]}>"))
-    if include_dense:
+            # Handle both scalar and dict density
+            dense = meta.gen_note_dense[p] if isinstance(meta.gen_note_dense, dict) else meta.gen_note_dense
+            prompt.append(tokenizer.get(f"<NOTE_DENSE_{dense}>"))
+            
+    if include_dense and getattr(meta, "genfield_measure", None):
         prompt.append(tokenizer.get(f"<GEN_MEASURE_COUNT_{meta.genfield_measure}>"))
-    prompt.append(tokenizer.get(f"k_{meta.key}"))
+        
+    if getattr(meta, "key", None):
+        prompt.append(tokenizer.get(f"k_{meta.key}"))
+        
     prompt.append(tokenizer.get("<TAG_END>"))
     return np.array(prompt)
 
@@ -70,42 +80,60 @@ class MORTM45Rapper(AbstractModelRapper):
             include_dense = task not in ["MIDI2Chord", "MetaGen"]
             
             for _ in range(meta.num_gems):
-                if self.meta["tag"]["version"] == "4.5D" or self.meta["tag"]["version"] == "4.5E":
-                    prompt = make_system_prompt_foundation(tokenizer, meta, include_dense=include_dense)
+                # Official Tag Order: SYSTEM -> (INST -> DENSE) list -> GEN_MEASURE -> k_ -> TAG_END
+                if task == "MetaGen":
+                    # Task 8 (MetaGen) Structure: EOS -> CONST_M -> MIDI -> TAG_END -> META (Target: SYSTEM -> ...)
+                    prompt = [tokenizer.get("<EOS>")]
                 else:
-                    prompt = make_system_prompt(tokenizer, meta.key, meta.program)
+                    # Standard System Prompt
+                    prompt = [tokenizer.get("<EOS>"), tokenizer.get("<SYSTEM>")]
+                    
+                    # 1. Instruments and Densities
+                    if meta.program:
+                        for i, prog in enumerate(meta.program):
+                            prompt.append(tokenizer.get(f"<INST_{prog}>"))
+                            if task not in ("MIDI2Chord", "MetaGen"):
+                                dense = meta.gen_note_dense[prog] if isinstance(meta.gen_note_dense, dict) else meta.gen_note_dense
+                                prompt.append(tokenizer.get(f"<NOTE_DENSE_{dense}>"))
+                    
+                    # 2. Generation Measure Count
+                    if task not in ("MIDI2Chord", "MetaGen") and getattr(meta, "genfield_measure", None):
+                        prompt.append(tokenizer.get(f"<GEN_MEASURE_COUNT_{meta.genfield_measure}>"))
+                    
+                    # 3. Key
+                    if getattr(meta, "key", None):
+                        prompt.append(tokenizer.get(f"k_{meta.key}"))
+                    
+                    prompt.append(tokenizer.get("<TAG_END>"))
 
+                # Task-specific Context/Target Tags
                 if task == "MIDI2Chord" or task == "MetaGen":
                     if const_midi is not None:
-                        print("----CONST MIDI LOAD----")
                         const = MIDIConverter(tokenizer, os.path.dirname(const_midi), os.path.basename(const_midi), program_list=meta.program, key=meta.key)
                         const()
-                        node_dict = const.midi2seq.aya_node
-                        const_seq = self.get_context(tokenizer, node_dict, "<CONST_M>")
-                        prompt = np.concatenate([prompt, np.array(const_seq)])
+                        # Use clean melody context (no chords)
+                        const_seq = self.get_context(tokenizer, const.midi2seq.aya_node, "<CONST_M>")
+                        prompt = np.concatenate([np.array(prompt), np.array(const_seq)])
                         
                     if task == "MIDI2Chord":
                         prompt = np.concatenate([prompt, np.array([tokenizer.get("<CGEN>")])])
                     else:
                         prompt = np.concatenate([prompt, np.array([tokenizer.get("<META>")])])
-                else:
-                    if task == "Chord2MIDI" or getattr(meta, "chord_item", None) is not None:
-                        if getattr(meta, "chord_item", None) is not None:
-                            print("----CHORD LOAD----")
-                            chord = MetaData2Chord(tokenizer, meta.key, meta.chord_item, meta.chord_times, meta.tempo, None, None, 999, False)
-                            chord()
-                            if len(chord.aya_node) > 1:
-                                c = [tokenizer.get("<CONST_C>")]
-                                # Use first target instrument for the chord sequence
-                                target_inst = meta.program[0] if meta.program else "PIANO"
-                                c.append(tokenizer.get(f"<INST_{target_inst}>"))
-                                c.extend(chord.aya_node[1])
-                                c.append(tokenizer.get("<ESEQ>"))
-                                c.append(tokenizer.get("<TAG_END>"))
-                                prompt = np.concatenate([prompt, np.array(c)])
-                            else:
-                                print("WARNING: No chord segments generated by MetaData2Chord")
+                elif task == "Chord2MIDI":
+                    if getattr(meta, "chord_item", None) is not None:
+                        chord = MetaData2Chord(tokenizer, meta.key, meta.chord_item, meta.chord_times, meta.tempo, None, None, 999, False)
+                        chord()
+                        if len(chord.aya_node) > 1:
+                            target_inst = meta.program[0] if meta.program else "PIANO"
+                            c = [tokenizer.get("<CONST_C>"), tokenizer.get(f"<INST_{target_inst}>")]
+                            c.extend(chord.aya_node[1])
+                            c.append(tokenizer.get("<ESEQ>"))
+                            c.append(tokenizer.get("<TAG_END>"))
+                            prompt = np.concatenate([prompt, np.array(c)])
                     
+                    prompt = np.concatenate([prompt, np.array([tokenizer.get("<MGEN>")])])
+                else:
+                    # Prompt2MIDI
                     prompt = np.concatenate([prompt, np.array([tokenizer.get("<MGEN>")])])
 
                 if meta.ai_continue_mode:
