@@ -131,13 +131,22 @@ class ModelController:
             self.model_locks[model_type] = lock
 
         final_output_path = None
+        is_json_result = False
         async with lock:
             kwargs = rapper.preprocessing(past_midi_path, const_midi_path, future_midi_path, meta)
             generated_data_kwargs = rapper.generate(**kwargs)
             output_paths = rapper.postprocessing(save_directory, **generated_data_kwargs)
 
-            if isinstance(output_paths, list):
-                if len(output_paths) > 1:
+            if isinstance(output_paths, list) and len(output_paths) > 0:
+                # Check if the outputs are non-file data (dicts/lists for MIDI2Chord, MetaGen)
+                if isinstance(output_paths[0], (dict, list)):
+                    # Non-file outputs: serialize to JSON
+                    json_output_path = os.path.join(save_directory, "output.json")
+                    with open(json_output_path, "w", encoding="utf-8") as f:
+                        json.dump(output_paths, f, ensure_ascii=False, indent=2)
+                    final_output_path = json_output_path
+                    is_json_result = True
+                elif len(output_paths) > 1:
                     zip_path = os.path.join(save_directory, "output.zip")
                     with zipfile.ZipFile(zip_path, 'w') as zf:
                         for file_path in output_paths:
@@ -152,5 +161,6 @@ class ModelController:
             "result": "success",
             "model_type": model_type,
             "save_path": str(save_directory),
-            "output_file": final_output_path
+            "output_file": final_output_path,
+            "is_json_result": is_json_result
         }

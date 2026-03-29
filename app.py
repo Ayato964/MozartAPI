@@ -111,15 +111,22 @@ async def generate(
         result = await CONTROLLER.generate(meta.model_type, past_midi_path, conditions_midi_path, future_midi_path, meta, save_path)
 
         output_file_path = result.get("output_file")
+        is_json_result = result.get("is_json_result", False)
 
-        # 4. ファイルパスの存在を確認
+        # 4. JSON結果の場合は直接JSONResponseで返す (MIDI2Chord, MetaGenなど)
+        if is_json_result and output_file_path and os.path.exists(output_file_path):
+            with open(output_file_path, "r", encoding="utf-8") as f:
+                json_data = json.load(f)
+            return JSONResponse(content={"result": "success", "data": json_data})
+
+        # 5. ファイルパスの存在を確認
         if not output_file_path or not os.path.exists(output_file_path):
             return JSONResponse(
                 content={"error": "生成されたファイルが見つかりません。"},
                 status_code=500,
             )
 
-        # 5. 拡張子に応じてmedia_typeを決定し、FileResponseとして返す
+        # 6. 拡張子に応じてmedia_typeを決定し、FileResponseとして返す
         file_extension = os.path.splitext(output_file_path)[1].lower()
         if file_extension == ".zip":
             media_type = "application/zip"
