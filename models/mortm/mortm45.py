@@ -1,63 +1,37 @@
-import json
 import os
+from typing import Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import torch
-
-from pretty_midi import PrettyMIDI
-from torch import Tensor
 from torch.nn.utils.rnn import pad_sequence
-from rapper import *
 
+from rapper import AbstractModelRapper, GenerateMeta
 from mortm.models.mortm import MORTM, MORTMArgs
 from mortm.models.modules.progress import _DefaultLearningProgress
-from mortm.utils.generate import *
-from mortm.utils.convert import MIDI2Seq
-from mortm.train.tokenizer import *
-from model import AbstractModelRapper
+from mortm.train.tokenizer import (
+    TO_MUSIC,
+    TO_TOKEN,
+    Tokenizer,
+    get_token_converter_pro,
+    omega_converter,
+)
+from mortm.utils.convert import MIDIConverter, MetaData2Chord
+from mortm.utils.de_convert import ct_token_to_midi
 
 
-def make_system_prompt(tokenizer, key, program, call_function = None):
-    prompt = [tokenizer.get("<EOS>"),
-              tokenizer.get("<SYSTEM>")]
+_TASK_ALIASES = {
+    "prompt2midi": "Prompt2MIDI",
+    "generate": "Prompt2MIDI",
+    "melodygen": "Prompt2MIDI",
+    "chord2midi": "Chord2MIDI",
+    "midi2chord": "MIDI2Chord",
+    "metagen": "MetaGen",
+}
 
-    for p in program:
-        prompt.append(tokenizer.get(f"<INST_{p}>"))
-        
-    if call_function is not None:
-        call_function(prompt)
-        
-    if key:
-        prompt.append(tokenizer.get(f"k_{key}"))
-        
-    prompt.append(tokenizer.get("<TAG_END>"))
-    return np.array(prompt)
-
-def make_system_prompt_foundation(tokenizer: Tokenizer, meta: GenerateMeta, include_dense: bool = True):
-    prompt = [tokenizer.get("<EOS>"),
-              tokenizer.get("<SYSTEM>")]
-
-    for p in meta.program:
-        prompt.append(tokenizer.get(f"<INST_{p}>"))
-        if include_dense:
-            # Handle both scalar and dict density
-            dense = meta.gen_note_dense[p] if isinstance(meta.gen_note_dense, dict) else meta.gen_note_dense
-            prompt.append(tokenizer.get(f"<NOTE_DENSE_{dense}>"))
-            
-    if include_dense and getattr(meta, "genfield_measure", None):
-        prompt.append(tokenizer.get(f"<GEN_MEASURE_COUNT_{meta.genfield_measure}>"))
-        
-    if getattr(meta, "key", None):
-        prompt.append(tokenizer.get(f"k_{meta.key}"))
-        
-    prompt.append(tokenizer.get("<TAG_END>"))
-    return np.array(prompt)
 
 class MORTM45Rapper(AbstractModelRapper):
-
-    """MORTMモデル用の具体的な処理を実装したクラス (Concrete Strategy)"""
     def _load_model(self):
-        model_path = self.meta['model_folder_path']
+        model_path = self.meta["model_folder_path"]
         config_path = os.path.join(model_path, "config.json")
         model_pth_path = os.path.join(model_path, "model.pth")
 
@@ -65,218 +39,481 @@ class MORTM45Rapper(AbstractModelRapper):
         args = MORTMArgs(config_path)
         progress = _DefaultLearningProgress()
         model: MORTM = MORTM(args, progress).to(progress.get_device())
-        model.load_state_dict(torch.load(model_pth_path), strict=False)
-        model.eval() # 推論モードに設定
+
+        state = torch.load(model_pth_path, map_location=progress.get_device())
+        missing, unexpected = model.load_state_dict(state, strict=False)
+        if missing:
+            print(f"[WARN] Missing keys: {missing}")
+        if unexpected:
+            print(f"[WARN] Unexpected keys: {unexpected}")
+        model.eval()
         return model
 
-    def preprocessing(self, past_midi, const_midi, future_midi, meta: GenerateMeta):
+    # ------------------------------------------------------------------
+    # normalization helpers
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _normalize_task(task: Optional[str]) -> str:
+        if task is None:
+            return "Prompt2MIDI"
+        key = "".join(ch for ch in task if ch.isalnum()).lower()
+        if key not in _TASK_ALIASES:
+            raise ValueError(f"Unsupported task: {task}")
+        return _TASK_ALIASES[key]
 
-        if self.meta["tag"]["model"] == "pretrained":
-            tokenizer = Tokenizer(get_token_converter_pro(TO_TOKEN))
-            seq = []
-            print(meta.num_gems)
-            
-            task = getattr(meta, "task", "Prompt2MIDI")
-            include_dense = task not in ["MIDI2Chord", "MetaGen"]
-            
-            for _ in range(meta.num_gems):
-                # Official Tag Order: SYSTEM -> (INST -> DENSE) list -> GEN_MEASURE -> k_ -> TAG_END
-                if task == "MetaGen":
-                    # Task 8 (MetaGen) Structure: EOS -> CONST_M -> MIDI -> TAG_END -> META (Target: SYSTEM -> ...)
-                    prompt = [tokenizer.get("<EOS>")]
-                else:
-                    # Standard System Prompt
-                    prompt = [tokenizer.get("<EOS>"), tokenizer.get("<SYSTEM>")]
-                    
-                    # 1. Instruments and Densities
-                    if meta.program:
-                        for i, prog in enumerate(meta.program):
-                            prompt.append(tokenizer.get(f"<INST_{prog}>"))
-                            if task not in ("MIDI2Chord", "MetaGen"):
-                                dense = meta.gen_note_dense[prog] if isinstance(meta.gen_note_dense, dict) else meta.gen_note_dense
-                                prompt.append(tokenizer.get(f"<NOTE_DENSE_{dense}>"))
-                    
-                    # 2. Generation Measure Count
-                    if task not in ("MIDI2Chord", "MetaGen") and getattr(meta, "genfield_measure", None):
-                        prompt.append(tokenizer.get(f"<GEN_MEASURE_COUNT_{meta.genfield_measure}>"))
-                    
-                    # 3. Key
-                    if getattr(meta, "key", None):
-                        prompt.append(tokenizer.get(f"k_{meta.key}"))
-                    
-                    prompt.append(tokenizer.get("<TAG_END>"))
+    @staticmethod
+    def _normalize_program_name(value: Union[str, int]) -> str:
+        if isinstance(value, int):
+            if 0 <= value <= 6:
+                return "PIANO"
+            if 64 <= value <= 68:
+                return "SAX"
+            raise ValueError(
+                f"Unsupported MIDI program id: {value}. "
+                f"現在のAPIは PIANO(0-6) / SAX(64-68) のみ対応です。"
+            )
 
-                # Task-specific Context/Target Tags
-                if task == "MIDI2Chord" or task == "MetaGen":
-                    if const_midi is not None:
-                        const = MIDIConverter(tokenizer, os.path.dirname(const_midi), os.path.basename(const_midi), program_list=meta.program, key=meta.key)
-                        const()
-                        # Use clean melody context (no chords)
-                        const_seq = self.get_context(tokenizer, const.midi2seq.aya_node, "<CONST_M>")
-                        prompt = np.concatenate([np.array(prompt), np.array(const_seq)])
-                        
-                    if task == "MIDI2Chord":
-                        prompt = np.concatenate([prompt, np.array([tokenizer.get("<CGEN>")])])
-                    else:
-                        prompt = np.concatenate([prompt, np.array([tokenizer.get("<META>")])])
-                elif task == "Chord2MIDI":
-                    if getattr(meta, "chord_item", None) is not None:
-                        chord = MetaData2Chord(tokenizer, meta.key, meta.chord_item, meta.chord_times, meta.tempo, None, None, 999, False)
-                        chord()
-                        if len(chord.aya_node) > 1:
-                            target_inst = meta.program[0] if meta.program else "PIANO"
-                            c = [tokenizer.get("<CONST_C>"), tokenizer.get(f"<INST_{target_inst}>")]
-                            c.extend(chord.aya_node[1])
-                            c.append(tokenizer.get("<ESEQ>"))
-                            c.append(tokenizer.get("<TAG_END>"))
-                            prompt = np.concatenate([prompt, np.array(c)])
-                    
-                    prompt = np.concatenate([prompt, np.array([tokenizer.get("<MGEN>")])])
-                else:
-                    # Prompt2MIDI
-                    prompt = np.concatenate([prompt, np.array([tokenizer.get("<MGEN>")])])
+        text = str(value).strip()
+        if text.isdigit():
+            return MORTM45Rapper._normalize_program_name(int(text))
 
-                if meta.ai_continue_mode:
-                    print("----AI CONTINUE MODE----")
-                    past = MIDIConverter(tokenizer, os.path.dirname(past_midi), os.path.basename(past_midi), program_list=meta.program, key=meta.key)
-                    past()
-                    node_dict = past.midi2seq.aya_node
-                    past_seq = []
-                    for program, inst in node_dict.items():
-                        print(inst)
-                        past_seq.append(tokenizer.get(f"<INST_{program}>"))
-                        past_seq.extend(inst[:-1])
-                    prompt = np.concatenate([prompt, np.array(past_seq)])
+        upper = text.upper()
+        aliases = {
+            "PIANO": "PIANO",
+            "ACOUSTIC_GRAND_PIANO": "PIANO",
+            "GRANDPIANO": "PIANO",
+            "SAX": "SAX",
+            "ALTO_SAX": "SAX",
+            "ALTOSAX": "SAX",
+            "TENOR_SAX": "SAX",
+            "TENORSAX": "SAX",
+        }
+        if upper not in aliases:
+            raise ValueError(
+                f"Unsupported program token: {value}. "
+                f"現在のAPIは PIANO / SAX のみ対応です。"
+            )
+        return aliases[upper]
 
-                seq.append(prompt)
+    def _normalize_programs(self, programs: Sequence[Union[str, int]]) -> List[str]:
+        normalized = [self._normalize_program_name(p) for p in programs]
+        deduped: List[str] = []
+        for p in normalized:
+            if p not in deduped:
+                deduped.append(p)
+        if not deduped:
+            raise ValueError("program が空です")
+        return deduped
 
-            return {"meta": meta, "sequence": np.array(seq), "tokenizer": tokenizer}
+    @staticmethod
+    def _clamp_measure_count(value: int) -> int:
+        return max(1, min(int(value), 8))
 
-        elif self.meta["tag"]["model"] == "generation":
-            task = getattr(meta, "task", "Prompt2MIDI")
-            include_dense = task not in ["MIDI2Chord", "MetaGen"]
-            
-            def call(p: list):
-                if include_dense:
-                    p.append(tokenizer.get(f"<GEN_MEASURE_COUNT_{min(meta.genfield_measure, 8)}>"))
+    @staticmethod
+    def _clamp_density(value: int) -> int:
+        return max(1, min(int(value), 10))
 
-            tokenizer = Tokenizer(omega_converter(TO_TOKEN))
-            seq = []
-            for _ in range(meta.num_gems):
-                prompt = make_system_prompt(tokenizer, meta.key, meta.program, call_function=call)
-                if past_midi is not None:
-                    print("----PAST MIDI LOAD----")
-                    past = MIDIConverter(tokenizer, os.path.dirname(past_midi), os.path.basename(past_midi), program_list=meta.program, key=meta.key)
-                    past()
-                    node_dict = past.midi2seq.aya_node
-                    past_seq = self.get_context(tokenizer, node_dict, "<PAST_M>")
-                    prompt = np.concatenate([prompt, np.array(past_seq)])
+    def _resolve_density(self, meta: GenerateMeta, program_name: str) -> int:
+        dense = meta.gen_note_dense
+        if isinstance(dense, dict):
+            candidates = [program_name, program_name.upper(), program_name.lower()]
+            for key in candidates:
+                if key in dense:
+                    return self._clamp_density(dense[key])
+            if len(dense) == 1:
+                return self._clamp_density(next(iter(dense.values())))
+            raise ValueError(
+                f"gen_note_dense に {program_name} の設定がありません。"
+                f"例: {{\"{program_name}\": 4}}"
+            )
+        return self._clamp_density(dense)
 
-                if task == "Chord2MIDI" or getattr(meta, "chord_item", None) is not None:
-                    if getattr(meta, "chord_item", None) is not None:
-                        print("----CHORD LOAD----")
-                        chord = MetaData2Chord(tokenizer, meta.key, meta.chord_item, meta.chord_times, meta.tempo, None, None, 999, False)
-                        chord()
-                        c = [tokenizer.get("<CONST_C>")]
-                        c.append(tokenizer.get(f"<INST_SAX>"))
-                        c.extend(chord.aya_node[1])
-                        c.append(tokenizer.get("<ESEQ>"))
-                        c.append(tokenizer.get("<TAG_END>"))
-    
-                        prompt = np.concatenate([prompt, np.array(c)])
+    # ------------------------------------------------------------------
+    # prompt builders
+    # ------------------------------------------------------------------
+    def _build_system_prompt(
+        self,
+        tokenizer: Tokenizer,
+        meta: GenerateMeta,
+        program_names: List[str],
+        *,
+        include_dense: bool,
+        include_measure_count: bool,
+    ) -> np.ndarray:
+        prompt: List[int] = [tokenizer.get("<EOS>"), tokenizer.get("<SYSTEM>")]
 
-                if const_midi is not None:
-                    print("----CONST MIDI LOAD----")
-                    const = MIDIConverter(tokenizer, os.path.dirname(const_midi), os.path.basename(const_midi), program_list=meta.program, key=meta.key)
-                    const()
-                    node_dict = const.midi2seq.aya_node
-                    const_seq = self.get_context(tokenizer, node_dict, "<CONST_M>")
-                    prompt = np.concatenate([prompt, np.array(const_seq)])
+        for program_name in program_names:
+            prompt.append(tokenizer.get(f"<INST_{program_name}>"))
+            if include_dense:
+                dense = self._resolve_density(meta, program_name)
+                prompt.append(tokenizer.get(f"<NOTE_DENSE_{dense}>"))
 
-                if future_midi is not None:
-                    print("----FUTURE MIDI LOAD----")
-                    future = MIDIConverter(tokenizer, os.path.dirname(future_midi), os.path.basename(future_midi), program_list=meta.program, key=meta.key)
-                    future()
-                    node_dict = future.midi2seq.aya_node
-                    future_seq = self.get_context(tokenizer, node_dict, "<FUTURE_M>")
-                    prompt = np.concatenate([prompt, np.array(future_seq)])
+        if include_measure_count:
+            prompt.append(
+                tokenizer.get(
+                    f"<GEN_MEASURE_COUNT_{self._clamp_measure_count(meta.genfield_measure)}>")
+            )
 
-                if task == "MIDI2Chord":
-                    prompt = np.concatenate([prompt, np.array([tokenizer.get("<CGEN>")])])
-                elif task == "MetaGen":
-                    prompt = np.concatenate([prompt, np.array([tokenizer.get("<META>")])])
-                else:
-                    prompt = np.concatenate([prompt, np.array([tokenizer.get("<MGEN>")])])
-                    
-                seq.append(torch.tensor(prompt).to('cuda'))
+        if getattr(meta, "key", None):
+            prompt.append(tokenizer.get(f"k_{meta.key}"))
 
-            return {"meta": meta, "sequence": seq, "tokenizer": tokenizer}
+        prompt.append(tokenizer.get("<TAG_END>"))
+        return np.asarray(prompt, dtype=np.int64)
 
+    def _load_midi_node_dict(
+        self,
+        tokenizer: Tokenizer,
+        midi_path: str,
+        program_names: List[str],
+        key: Optional[str],
+    ) -> Dict[str, np.ndarray]:
+        converter = MIDIConverter(
+            tokenizer,
+            os.path.dirname(midi_path),
+            os.path.basename(midi_path),
+            program_list=program_names,
+            key=key,
+            use_midi2seq=True,
+            use_midi2seq_with_chord=False,
+        )
+        converter.convert()
+        if converter.is_error:
+            raise ValueError(converter.error_reason)
+        if converter.midi2seq is None:
+            raise ValueError("MIDI2Seq converter was not initialized")
+        return converter.midi2seq.aya_node
 
-    def get_context(self, tokenizer: Tokenizer, node_dict: dict, key_token: str):
-        past_seq = [tokenizer.get(key_token)]
-        
-        # Token ranges for chords
+    def get_context(self, tokenizer: Tokenizer, node_dict: dict, key_token: str) -> List[int]:
+        seq = [tokenizer.get(key_token)]
+
         cr_range = tokenizer.get_length_tuple("CR")
         cq_range = tokenizer.get_length_tuple("CQ")
         cb_range = tokenizer.get_length_tuple("CB")
-        
-        for program, inst in node_dict.items():
-            past_seq.append(tokenizer.get(f"<INST_{program}>"))
-            # Filter out chord tokens if we are providing MIDI context
+
+        for program_name, inst in node_dict.items():
+            seq.append(tokenizer.get(f"<INST_{program_name}>"))
             clean_inst = []
             for t_id in inst[:-1]:
-                if cr_range[0] <= t_id <= cr_range[1] or \
-                   cq_range[0] <= t_id <= cq_range[1] or \
-                   cb_range[0] <= t_id <= cb_range[1]:
+                if (
+                    cr_range[0] <= t_id <= cr_range[1]
+                    or cq_range[0] <= t_id <= cq_range[1]
+                    or cb_range[0] <= t_id <= cb_range[1]
+                ):
                     continue
-                clean_inst.append(t_id)
-            past_seq.extend(clean_inst)
-            past_seq.append(tokenizer.get(f"<ESEQ>"))
-        past_seq.append(tokenizer.get("<TAG_END>"))
-        return past_seq
+                clean_inst.append(int(t_id))
+            seq.extend(clean_inst)
+            seq.append(tokenizer.get("<ESEQ>"))
+        seq.append(tokenizer.get("<TAG_END>"))
+        return seq
 
+    def _build_midi_context(
+        self,
+        tokenizer: Tokenizer,
+        midi_path: str,
+        key_token: str,
+        program_names: List[str],
+        key: Optional[str],
+    ) -> np.ndarray:
+        node_dict = self._load_midi_node_dict(tokenizer, midi_path, program_names, key)
+        return np.asarray(self.get_context(tokenizer, node_dict, key_token), dtype=np.int64)
+
+    def _build_const_chord_prompt(self, tokenizer: Tokenizer, meta: GenerateMeta) -> np.ndarray:
+        if meta.chord_item is None or meta.chord_times is None:
+            raise ValueError("Chord2MIDI 系では chord_item と chord_times が必要です")
+
+        chord = MetaData2Chord(
+            tokenizer,
+            meta.key,
+            meta.chord_item,
+            meta.chord_times,
+            meta.tempo,
+            None,
+            None,
+            999,
+            False,
+        )
+        chord.convert()
+        if len(chord.aya_node) <= 1:
+            raise ValueError("コード進行をトークン化できませんでした")
+
+        chord_tokens = np.asarray(chord.aya_node[1], dtype=np.int64)
+        return np.concatenate(
+            [
+                np.asarray([tokenizer.get("<CONST_C>")], dtype=np.int64),
+                chord_tokens,
+                np.asarray([tokenizer.get("<ESEQ>"), tokenizer.get("<TAG_END>")], dtype=np.int64),
+            ]
+        )
+
+    def _build_pretrained_prompt(
+        self,
+        tokenizer: Tokenizer,
+        past_midi: Optional[str],
+        const_midi: Optional[str],
+        future_midi: Optional[str],
+        meta: GenerateMeta,
+        program_names: List[str],
+    ) -> np.ndarray:
+        task = self._normalize_task(meta.task)
+
+        if task == "MetaGen":
+            if const_midi is None:
+                raise ValueError("MetaGen では conditions_midi が必須です")
+            if past_midi is not None or future_midi is not None or meta.chord_item is not None:
+                raise ValueError("MetaGen は conditions_midi のみ対応です")
+
+            prompt = np.asarray([tokenizer.get("<EOS>")], dtype=np.int64)
+            const_seq = self._build_midi_context(tokenizer, const_midi, "<CONST_M>", program_names, meta.key)
+            return np.concatenate([prompt, const_seq, np.asarray([tokenizer.get("<META>")], dtype=np.int64)])
+
+        if task == "MIDI2Chord":
+            if const_midi is None:
+                raise ValueError("MIDI2Chord では conditions_midi が必須です")
+            if past_midi is not None or future_midi is not None or meta.chord_item is not None:
+                raise ValueError("MIDI2Chord は conditions_midi のみ対応です")
+
+        include_dense = task != "MIDI2Chord"
+        include_measure_count = future_midi is None
+        prompt = self._build_system_prompt(
+            tokenizer,
+            meta,
+            program_names,
+            include_dense=include_dense,
+            include_measure_count=include_measure_count,
+        )
+
+        if past_midi is not None:
+            prompt = np.concatenate(
+                [prompt, self._build_midi_context(tokenizer, past_midi, "<PAST_M>", program_names, meta.key)]
+            )
+
+        if future_midi is not None:
+            prompt = np.concatenate(
+                [prompt, self._build_midi_context(tokenizer, future_midi, "<FUTURE_M>", program_names, meta.key)]
+            )
+
+        if const_midi is not None:
+            prompt = np.concatenate(
+                [prompt, self._build_midi_context(tokenizer, const_midi, "<CONST_M>", program_names, meta.key)]
+            )
+
+        if meta.chord_item is not None:
+            prompt = np.concatenate([prompt, self._build_const_chord_prompt(tokenizer, meta)])
+
+        start_token = "<CGEN>" if task == "MIDI2Chord" else "<MGEN>"
+        return np.concatenate([prompt, np.asarray([tokenizer.get(start_token)], dtype=np.int64)])
+
+    # ------------------------------------------------------------------
+    # preprocessing
+    # ------------------------------------------------------------------
+    def preprocessing(self, past_midi, const_midi, future_midi, meta: GenerateMeta):
+        program_names = self._normalize_programs(meta.program)
+        task = self._normalize_task(meta.task)
+        model_tag = self.meta["tag"]["model"]
+
+        if model_tag == "pretrained":
+            tokenizer = Tokenizer(get_token_converter_pro(TO_TOKEN))
+            sequences = []
+            for _ in range(meta.num_gems):
+                sequences.append(
+                    self._build_pretrained_prompt(
+                        tokenizer,
+                        past_midi,
+                        const_midi,
+                        future_midi,
+                        meta,
+                        program_names,
+                    )
+                )
+            return {
+                "meta": meta,
+                "task": task,
+                "sequence": np.stack(sequences, axis=0),
+                "tokenizer": tokenizer,
+            }
+
+        if model_tag == "generation":
+            if task in {"MIDI2Chord", "MetaGen"}:
+                raise ValueError(f"{self.meta['model_name']} は {task} をサポートしていません")
+
+            tokenizer = Tokenizer(omega_converter(TO_TOKEN))
+            sequences = []
+            for _ in range(meta.num_gems):
+                prompt = self._build_system_prompt(
+                    tokenizer,
+                    meta,
+                    program_names,
+                    include_dense=True,
+                    include_measure_count=(future_midi is None),
+                )
+
+                if past_midi is not None:
+                    prompt = np.concatenate(
+                        [prompt, self._build_midi_context(tokenizer, past_midi, "<PAST_M>", program_names, meta.key)]
+                    )
+                if future_midi is not None:
+                    prompt = np.concatenate(
+                        [prompt, self._build_midi_context(tokenizer, future_midi, "<FUTURE_M>", program_names, meta.key)]
+                    )
+                if const_midi is not None:
+                    prompt = np.concatenate(
+                        [prompt, self._build_midi_context(tokenizer, const_midi, "<CONST_M>", program_names, meta.key)]
+                    )
+                if meta.chord_item is not None:
+                    prompt = np.concatenate([prompt, self._build_const_chord_prompt(tokenizer, meta)])
+
+                prompt = np.concatenate([prompt, np.asarray([tokenizer.get("<MGEN>")], dtype=np.int64)])
+                sequences.append(torch.tensor(prompt, dtype=torch.long, device="cuda"))
+
+            return {
+                "meta": meta,
+                "task": task,
+                "sequence": sequences,
+                "tokenizer": tokenizer,
+            }
+
+        raise ValueError(f"Unsupported model tag: {model_tag}")
+
+    # ------------------------------------------------------------------
+    # generation
+    # ------------------------------------------------------------------
+    @torch.inference_mode()
+    def _sample_meta_sequences(
+        self,
+        tokenizer: Tokenizer,
+        src: Union[np.ndarray, torch.Tensor],
+        *,
+        p: float,
+        temperature: float,
+    ) -> List[np.ndarray]:
+        device = self.model.progress.get_device()
+
+        if isinstance(src, np.ndarray):
+            src_tensor = torch.tensor(src, dtype=torch.long, device=device)
+        else:
+            src_tensor = src.to(device=device, dtype=torch.long)
+
+        if src_tensor.dim() == 1:
+            src_tensor = src_tensor.unsqueeze(0)
+
+        padding_id = tokenizer.get("<PAD>")
+        padding_mask = src_tensor != padding_id
+
+        logits = self.model.forward(
+            src_tensor,
+            padding_mask=padding_mask,
+            is_causal=True,
+            is_save_cache=True,
+        )
+        next_tokens = self.model.top_p_sampling(logits[:, -1, :], p=p, temperature=temperature)
+        all_tokens = torch.cat([src_tensor, next_tokens.unsqueeze(1)], dim=1)
+
+        max_steps = int(self.model.args.position_length)
+        step = 0
+        while True:
+            logits = self.model.forward(
+                next_tokens.unsqueeze(1),
+                padding_mask=None,
+                is_causal=True,
+                is_save_cache=True,
+            )
+            next_tokens = self.model.top_p_sampling(logits.squeeze(1), p=p, temperature=temperature)
+            all_tokens = torch.cat([all_tokens, next_tokens.unsqueeze(1)], dim=1)
+            step += 1
+            if self.model.is_end_point(all_tokens, [tokenizer.get("<TE>")]) or step >= max_steps:
+                break
+
+        outputs: List[np.ndarray] = []
+        meta_id = tokenizer.get("<META>")
+        te_id = tokenizer.get("<TE>")
+        for row in all_tokens:
+            row = row[row != padding_id]
+            meta_pos = (row == meta_id).nonzero(as_tuple=True)[0]
+            if len(meta_pos) == 0:
+                raise ValueError("<META> 開始位置を検出できませんでした")
+            start = int(meta_pos[-1].item())
+            te_pos = (row == te_id).nonzero(as_tuple=True)[0]
+            end = int(te_pos[0].item()) if len(te_pos) > 0 else len(row) - 1
+            outputs.append(row[start:end + 1].detach().cpu().numpy())
+        return outputs
 
     def generate(self, **kwargs):
-        meta: GenerateMeta = kwargs['meta']
+        meta: GenerateMeta = kwargs["meta"]
+        tokenizer: Tokenizer = kwargs["tokenizer"]
+        task: str = kwargs["task"]
+        sequence = kwargs["sequence"]
+
+        if task == "MetaGen":
+            generated = self._sample_meta_sequences(
+                tokenizer,
+                sequence,
+                p=meta.p,
+                temperature=meta.temperature,
+            )
+            return {
+                "meta": meta,
+                "task": task,
+                "tokenizer": tokenizer,
+                "sequence": ([], generated),
+            }
+
         if self.meta["tag"]["model"] == "pretrained":
-            np_all, pack = self.model.top_sampling_measure_kv_cache(tokenizer=kwargs["tokenizer"], src=kwargs["sequence"],
-                                                     p=meta.p, temperature=meta.temperature)
-            return {"meta": kwargs['meta'], "tokenizer": kwargs['tokenizer'], "sequence": pack}
+            _, pack = self.model.top_sampling_measure_kv_cache(
+                tokenizer=tokenizer,
+                src=sequence,
+                p=meta.p,
+                temperature=meta.temperature,
+            )
+            return {
+                "meta": meta,
+                "task": task,
+                "tokenizer": tokenizer,
+                "sequence": pack,
+            }
 
         if self.meta["tag"]["model"] == "generation":
-            np_all, pack = self.model.top_sampling_measure_kv_cache(tokenizer=kwargs["tokenizer"], src=pad_sequence(kwargs["sequence"], batch_first=True),
-                                                     p=meta.p, temperature=meta.temperature)
+            _, pack = self.model.top_sampling_measure_kv_cache(
+                tokenizer=tokenizer,
+                src=pad_sequence(sequence, batch_first=True, padding_value=tokenizer.get("<PAD>")),
+                p=meta.p,
+                temperature=meta.temperature,
+            )
+            return {
+                "meta": meta,
+                "task": task,
+                "tokenizer": tokenizer,
+                "sequence": pack,
+            }
 
-            return {"meta": kwargs['meta'], "tokenizer": kwargs['tokenizer'], "sequence": pack}
+        raise ValueError(f"Unsupported model tag: {self.meta['tag']['model']}")
 
+    # ------------------------------------------------------------------
+    # postprocessing
+    # ------------------------------------------------------------------
     def postprocessing(self, save_directory, **kwargs):
+        meta: GenerateMeta = kwargs["meta"]
+        tokenizer: Tokenizer = kwargs["tokenizer"]
+        task: str = kwargs["task"]
+        sequence_pack = kwargs["sequence"]
 
-        if self.meta["tag"]["model"] == "pretrained" or self.meta["tag"]["model"] == "generation":
-            meta: GenerateMeta = kwargs['meta']
-            tokenizer: Tokenizer = kwargs['tokenizer']
-            tokenizer.mode(TO_MUSIC)
-            sequence = kwargs['sequence']
-            
-            task = getattr(meta, "task", "Prompt2MIDI")
-            
-            outputs = []
-            for i in range(len(sequence[1])):
-                seq_tokens = sequence[1][i]
-                
-                if task == "MIDI2Chord":
-                    chords = self._parse_chords(tokenizer, seq_tokens, meta.tempo)
-                    outputs.append(chords)
-                elif task == "MetaGen":
-                    m_data = self._parse_metadata(tokenizer, seq_tokens)
-                    outputs.append(m_data)
-                else: 
-                    output_path = os.path.join(save_directory, f"output_{i}.mid")
-                    outputs.append(output_path)
-                    ct_token_to_midi(tokenizer, seq_tokens, output_path, tempo=meta.tempo)
-                    
-            return outputs
+        tokenizer.mode(TO_MUSIC)
+        generated_sequences = sequence_pack[1]
 
+        outputs = []
+        for i, seq_tokens in enumerate(generated_sequences):
+            if task == "MIDI2Chord":
+                outputs.append(self._parse_chords(tokenizer, seq_tokens, meta.tempo))
+            elif task == "MetaGen":
+                outputs.append(self._parse_metadata(tokenizer, seq_tokens))
+            else:
+                output_path = os.path.join(save_directory, f"output_{i}.mid")
+                ct_token_to_midi(tokenizer, seq_tokens, output_path, tempo=meta.tempo)
+                outputs.append(output_path)
+        return outputs
+
+    # ------------------------------------------------------------------
+    # parsers
+    # ------------------------------------------------------------------
     def _parse_chords(self, tokenizer: Tokenizer, seq, tempo: int):
         b4 = 60 / tempo
         measure = b4 * 4
@@ -285,11 +522,11 @@ class MORTM45Rapper(AbstractModelRapper):
         measure_start_time = 0.0
         current_time = 0.0
         chords = []
-        
+
         current_root = None
         current_quality = None
         current_bass = None
-        
+
         def try_commit():
             nonlocal current_root, current_quality, current_bass
             if current_root is not None:
@@ -300,20 +537,16 @@ class MORTM45Rapper(AbstractModelRapper):
                 current_quality = None
                 current_bass = None
 
-        # Ensure we have a 1D sequence of token IDs
-        if hasattr(seq, 'flatten'):
+        if hasattr(seq, "flatten"):
             seq = seq.flatten()
-            
-        for i, token_id in enumerate(seq):
-            t_id = int(token_id.item()) if hasattr(token_id, 'item') else int(token_id)
+
+        for token_id in seq:
+            t_id = int(token_id.item()) if hasattr(token_id, "item") else int(token_id)
             token = tokenizer.rev_get(t_id)
-            if i < 10: print(f"DEBUG Chords token[{i}]: {token}")
             if token is None:
                 continue
-                
-            if token == "<TE>" or token == "<EOS>" or token == "<TAG_END>":
+            if token in {"<TE>", "<EOS>", "<TAG_END>"}:
                 break
-                
             if token == "<SME>":
                 measure_start_time += measure
             elif token.startswith("s_"):
@@ -335,27 +568,19 @@ class MORTM45Rapper(AbstractModelRapper):
         instruments = []
         densities = {}
         current_inst = None
-        # Ensure we have a 1D sequence of token IDs
-        if hasattr(seq, 'flatten'):
+
+        if hasattr(seq, "flatten"):
             seq = seq.flatten()
 
-        for i, token_id in enumerate(seq):
-            t_id = int(token_id.item()) if hasattr(token_id, 'item') else int(token_id)
+        for token_id in seq:
+            t_id = int(token_id.item()) if hasattr(token_id, "item") else int(token_id)
             token = tokenizer.rev_get(t_id)
-            if i < 20: print(f"DEBUG MetaGen token[{i}]: {token}")
             if token is None:
                 continue
-                
-            if token == "<TE>":
+            if token in {"<TE>", "<TAG_END>"}:
                 break
-                
-            # Skip structural tokens
-            if token in ("<EOS>", "<SYSTEM>", "<META>", "<MGEN>", "<CGEN>"):
+            if token in {"<EOS>", "<SYSTEM>", "<META>", "<MGEN>", "<CGEN>"}:
                 continue
-                
-            if token == "<TAG_END>":
-                break
-                
             if token.startswith("k_"):
                 meta_dict["key"] = token[2:]
             elif token.startswith("<INST_"):
@@ -363,16 +588,13 @@ class MORTM45Rapper(AbstractModelRapper):
                 instruments.append(current_inst)
             elif token.startswith("<NOTE_DENSE_"):
                 density_val = token[12:-1]
-                if current_inst:
+                if current_inst is not None:
                     densities[current_inst] = density_val
-                else:
-                    meta_dict["density"] = density_val
             elif token.startswith("<GEN_MEASURE_COUNT_"):
                 meta_dict["gen_measure_count"] = token[19:-1]
-        
+
         if instruments:
             meta_dict["instruments"] = instruments
         if densities:
             meta_dict["note_density"] = densities
-                
         return meta_dict
