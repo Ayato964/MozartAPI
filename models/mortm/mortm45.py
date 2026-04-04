@@ -1,5 +1,5 @@
 import os
-from typing import Dict, List, Optional, Sequence, Tuple, Union
+from typing import Dict, List, Optional, Sequence, Union
 
 import numpy as np
 import torch
@@ -46,6 +46,7 @@ class MORTM45Rapper(AbstractModelRapper):
             print(f"[WARN] Missing keys: {missing}")
         if unexpected:
             print(f"[WARN] Unexpected keys: {unexpected}")
+
         model.eval()
         return model
 
@@ -151,7 +152,8 @@ class MORTM45Rapper(AbstractModelRapper):
         if include_measure_count:
             prompt.append(
                 tokenizer.get(
-                    f"<GEN_MEASURE_COUNT_{self._clamp_measure_count(meta.genfield_measure)}>")
+                    f"<GEN_MEASURE_COUNT_{self._clamp_measure_count(meta.genfield_measure)}>"
+                )
             )
 
         if getattr(meta, "key", None):
@@ -192,7 +194,7 @@ class MORTM45Rapper(AbstractModelRapper):
 
         for program_name, inst in node_dict.items():
             seq.append(tokenizer.get(f"<INST_{program_name}>"))
-            clean_inst = []
+            clean_inst: List[int] = []
             for t_id in inst[:-1]:
                 if (
                     cr_range[0] <= t_id <= cr_range[1]
@@ -245,6 +247,77 @@ class MORTM45Rapper(AbstractModelRapper):
             ]
         )
 
+    def _build_ai_continue_seed(self, tokenizer: Tokenizer, node_dict: dict) -> np.ndarray:
+        """
+        Build a continuation seed for ai_continue_mode.
+
+        Important:
+        - Do NOT keep terminal tokens from the past MIDI (<TE>, <ESEQ>).
+          If they remain inside the prompt, MORTM's generation loop detects an
+          end token in the prompt itself and stops almost immediately.
+        - ai_continue_mode is currently defined only for a single target track.
+        """
+        if len(node_dict) != 1:
+            raise ValueError("ai_continue_mode は現在 1 トラック入力のみ対応です。")
+
+        te_id = tokenizer.get("<TE>")
+        eseq_id = tokenizer.get("<ESEQ>")
+        tag_end_id = tokenizer.get("<TAG_END>")
+        mgen_id = tokenizer.get("<MGEN>")
+        cgen_id = tokenizer.get("<CGEN>")
+
+        cr_range = tokenizer.get_length_tuple("CR")
+        cq_range = tokenizer.get_length_tuple("CQ")
+        cb_range = tokenizer.get_length_tuple("CB")
+
+        seed: List[int] = []
+        for program_name, inst in node_dict.items():
+            seed.append(tokenizer.get(f"<INST_{program_name}>"))
+            for t_id in inst:
+                t_id = int(t_id)
+
+                # strip chord tokens from melody continuation
+                if cr_range[0] <= t_id <= cr_range[1]:
+                    continue
+                if cq_range[0] <= t_id <= cq_range[1]:
+                    continue
+                if cb_range[0] <= t_id <= cb_range[1]:
+                    continue
+
+                # strip terminal / boundary tokens from the past seed
+                if t_id in {te_id, eseq_id, tag_end_id, mgen_id, cgen_id}:
+                    continue
+
+                seed.append(t_id)
+
+        if len(seed) <= 1:
+            raise ValueError("ai_continue_mode 用の seed が空です。past_midi を確認してください。")
+
+        return np.asarray(seed, dtype=np.int64)
+
+    def _extract_from_generation_start(self, tokenizer: Tokenizer, seq: np.ndarray) -> np.ndarray:
+        seq = np.asarray(seq, dtype=np.int64)
+
+        mgen_id = tokenizer.get("<MGEN>")
+        cgen_id = tokenizer.get("<CGEN>")
+        te_id = tokenizer.get("<TE>")
+
+        gen_pos = np.where((seq == mgen_id) | (seq == cgen_id))[0]
+        if len(gen_pos) == 0:
+            raise ValueError("生成系列内に <MGEN>/<CGEN> が見つかりません。")
+
+        start = int(gen_pos[-1])
+        te_pos = np.where(seq == te_id)[0]
+        end = int(te_pos[0]) + 1 if len(te_pos) > 0 else len(seq)
+
+        sliced = seq[start:end]
+
+        inst_prefix = [tokenizer.get("<INST_PIANO>"), tokenizer.get("<INST_SAX>")]
+        if not any(tok in sliced for tok in inst_prefix):
+            raise ValueError("ai_continue decode 用系列に <INST_...> が含まれていません。")
+
+        return sliced
+
     def _build_pretrained_prompt(
         self,
         tokenizer: Tokenizer,
@@ -263,8 +336,12 @@ class MORTM45Rapper(AbstractModelRapper):
                 raise ValueError("MetaGen は conditions_midi のみ対応です")
 
             prompt = np.asarray([tokenizer.get("<EOS>")], dtype=np.int64)
-            const_seq = self._build_midi_context(tokenizer, const_midi, "<CONST_M>", program_names, meta.key)
-            return np.concatenate([prompt, const_seq, np.asarray([tokenizer.get("<META>")], dtype=np.int64)])
+            const_seq = self._build_midi_context(
+                tokenizer, const_midi, "<CONST_M>", program_names, meta.key
+            )
+            return np.concatenate(
+                [prompt, const_seq, np.asarray([tokenizer.get("<META>")], dtype=np.int64)]
+            )
 
         if task == "MIDI2Chord":
             if const_midi is None:
@@ -282,7 +359,7 @@ class MORTM45Rapper(AbstractModelRapper):
             include_measure_count=include_measure_count,
         )
 
-        if past_midi is not None:
+        if past_midi is not None and not meta.ai_continue_mode:
             prompt = np.concatenate(
                 [prompt, self._build_midi_context(tokenizer, past_midi, "<PAST_M>", program_names, meta.key)]
             )
@@ -301,7 +378,17 @@ class MORTM45Rapper(AbstractModelRapper):
             prompt = np.concatenate([prompt, self._build_const_chord_prompt(tokenizer, meta)])
 
         start_token = "<CGEN>" if task == "MIDI2Chord" else "<MGEN>"
-        return np.concatenate([prompt, np.asarray([tokenizer.get(start_token)], dtype=np.int64)])
+        prompt = np.concatenate([prompt, np.asarray([tokenizer.get(start_token)], dtype=np.int64)])
+
+        if task == "Prompt2MIDI" and meta.ai_continue_mode:
+            if past_midi is None:
+                raise ValueError("ai_continue_mode=True の場合は past_midi が必要です")
+            node_dict = self._load_midi_node_dict(tokenizer, past_midi, program_names, meta.key)
+            seed = self._build_ai_continue_seed(tokenizer, node_dict)
+            print(f"[AI_CONTINUE] seed_length={len(seed)} | last_tokens={seed[-8:].tolist()}")
+            prompt = np.concatenate([prompt, seed])
+
+        return prompt
 
     # ------------------------------------------------------------------
     # preprocessing
@@ -335,6 +422,8 @@ class MORTM45Rapper(AbstractModelRapper):
         if model_tag == "generation":
             if task in {"MIDI2Chord", "MetaGen"}:
                 raise ValueError(f"{self.meta['model_name']} は {task} をサポートしていません")
+            if meta.ai_continue_mode:
+                raise ValueError("generation タグのモデルでは ai_continue_mode は未対応です")
 
             tokenizer = Tokenizer(omega_converter(TO_TOKEN))
             sequences = []
@@ -399,27 +488,46 @@ class MORTM45Rapper(AbstractModelRapper):
         padding_id = tokenizer.get("<PAD>")
         padding_mask = src_tensor != padding_id
 
-        logits = self.model.forward(
-            src_tensor,
-            padding_mask=padding_mask,
-            is_causal=True,
-            is_save_cache=True,
+        autocast_dtype = torch.bfloat16
+        autocast_device = device.type
+
+        with torch.autocast(device_type=autocast_device, dtype=autocast_dtype):
+            logits = self.model.forward(
+                src_tensor,
+                padding_mask=padding_mask,
+                is_causal=True,
+                is_save_cache=True,
+            )
+
+        next_tokens = self.model.top_p_sampling(
+            logits[:, -1, :],
+            p=p,
+            temperature=temperature,
         )
-        next_tokens = self.model.top_p_sampling(logits[:, -1, :], p=p, temperature=temperature)
         all_tokens = torch.cat([src_tensor, next_tokens.unsqueeze(1)], dim=1)
 
         max_steps = int(self.model.args.position_length)
         step = 0
+
         while True:
-            logits = self.model.forward(
-                next_tokens.unsqueeze(1),
-                padding_mask=None,
-                is_causal=True,
-                is_save_cache=True,
+            with torch.autocast(device_type=autocast_device, dtype=autocast_dtype):
+                logits = self.model.forward(
+                    next_tokens,
+                    padding_mask=None,
+                    is_causal=True,
+                    is_save_cache=True,
+                )
+
+            logits_for_sampling = logits.squeeze(1) if logits.dim() == 3 else logits
+
+            next_tokens = self.model.top_p_sampling(
+                logits_for_sampling,
+                p=p,
+                temperature=temperature,
             )
-            next_tokens = self.model.top_p_sampling(logits.squeeze(1), p=p, temperature=temperature)
             all_tokens = torch.cat([all_tokens, next_tokens.unsqueeze(1)], dim=1)
             step += 1
+
             if self.model.is_end_point(all_tokens, [tokenizer.get("<TE>")]) or step >= max_steps:
                 break
 
@@ -454,11 +562,12 @@ class MORTM45Rapper(AbstractModelRapper):
                 "meta": meta,
                 "task": task,
                 "tokenizer": tokenizer,
-                "sequence": ([], generated),
+                "full_sequences": generated,
+                "generated_parts": generated,
             }
 
         if self.meta["tag"]["model"] == "pretrained":
-            _, pack = self.model.top_sampling_measure_kv_cache(
+            full_sequences, (_, generated_parts) = self.model.top_sampling_measure_kv_cache(
                 tokenizer=tokenizer,
                 src=sequence,
                 p=meta.p,
@@ -468,11 +577,12 @@ class MORTM45Rapper(AbstractModelRapper):
                 "meta": meta,
                 "task": task,
                 "tokenizer": tokenizer,
-                "sequence": pack,
+                "full_sequences": full_sequences,
+                "generated_parts": generated_parts,
             }
 
         if self.meta["tag"]["model"] == "generation":
-            _, pack = self.model.top_sampling_measure_kv_cache(
+            full_sequences, (_, generated_parts) = self.model.top_sampling_measure_kv_cache(
                 tokenizer=tokenizer,
                 src=pad_sequence(sequence, batch_first=True, padding_value=tokenizer.get("<PAD>")),
                 p=meta.p,
@@ -482,7 +592,8 @@ class MORTM45Rapper(AbstractModelRapper):
                 "meta": meta,
                 "task": task,
                 "tokenizer": tokenizer,
-                "sequence": pack,
+                "full_sequences": full_sequences,
+                "generated_parts": generated_parts,
             }
 
         raise ValueError(f"Unsupported model tag: {self.meta['tag']['model']}")
@@ -494,21 +605,27 @@ class MORTM45Rapper(AbstractModelRapper):
         meta: GenerateMeta = kwargs["meta"]
         tokenizer: Tokenizer = kwargs["tokenizer"]
         task: str = kwargs["task"]
-        sequence_pack = kwargs["sequence"]
 
         tokenizer.mode(TO_MUSIC)
-        generated_sequences = sequence_pack[1]
+        full_sequences = kwargs["full_sequences"]
+        generated_parts = kwargs["generated_parts"]
 
         outputs = []
-        for i, seq_tokens in enumerate(generated_sequences):
+        for i in range(len(full_sequences)):
             if task == "MIDI2Chord":
-                outputs.append(self._parse_chords(tokenizer, seq_tokens, meta.tempo))
+                outputs.append(self._parse_chords(tokenizer, generated_parts[i], meta.tempo))
             elif task == "MetaGen":
-                outputs.append(self._parse_metadata(tokenizer, seq_tokens))
+                outputs.append(self._parse_metadata(tokenizer, generated_parts[i]))
             else:
+                if meta.ai_continue_mode:
+                    seq_tokens = self._extract_from_generation_start(tokenizer, full_sequences[i])
+                else:
+                    seq_tokens = generated_parts[i]
+
                 output_path = os.path.join(save_directory, f"output_{i}.mid")
                 ct_token_to_midi(tokenizer, seq_tokens, output_path, tempo=meta.tempo)
                 outputs.append(output_path)
+
         return outputs
 
     # ------------------------------------------------------------------
