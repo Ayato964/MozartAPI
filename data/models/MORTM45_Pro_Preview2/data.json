@@ -4,6 +4,7 @@
   "tag": {
     "instruments":["PIANO", "SAX"],
     "model": "pretrained",
+    "task": ["Meta2MIDI"],
     "type": "mortm",
     "version": "4.5"
   },
@@ -18,6 +19,7 @@
     "send_context_future": false,
     "send_chord_progression": false,
     "gen_measure_count": false,
-    "gen_note_dense": false
+    "gen_note_dense": false,
+    "send_chord":false
   }
 }

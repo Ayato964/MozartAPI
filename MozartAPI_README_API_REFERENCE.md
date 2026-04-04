@@ -108,8 +108,7 @@ Body なし。
 {
   "model_type": "MORTM4.5D-Lite",
   "program": ["PIANO"],
-  "tempo": 120,
-  "task": "Prompt2MIDI",
+  "task": "Meta2MIDI",
   "key": "CM",
   "num_gems": 1,
   "genfield_measure": 8,
@@ -143,13 +142,11 @@ Body なし。
   0 より大きい必要があります。
 
 - `task: string`  
-  対応エイリアス:
-  - `Prompt2MIDI`
-  - `generate` → `Prompt2MIDI`
-  - `melodygen` → `Prompt2MIDI`
+  推奨タスク名 (対応エイリアス):
+  - `Meta2MIDI` (旧: `Prompt2MIDI`, `generate`, `melodygen`)
+  - `MIDI2Meta` (旧: `MetaGen`)
   - `Chord2MIDI`
   - `MIDI2Chord`
-  - `MetaGen`
 
 - `key: string | null`  
   例: `CM`, `Am`
@@ -196,13 +193,13 @@ Body なし。
 
 ## 4. タスク仕様
 
-### 4.1 `Prompt2MIDI`
+### 4.1 `Meta2MIDI`
 
 メタ情報から旋律を生成します。最も基本的な経路です。
 
 #### 最低要件
 
-- `task = "Prompt2MIDI"`
+- `task = "Meta2MIDI"`
 - `program`
 - `tempo`
 
@@ -276,13 +273,13 @@ Body なし。
 
 ---
 
-### 4.4 `MetaGen`
+### 4.4 `MIDI2Meta`
 
 入力 MIDI からメタ情報を推定します。
 
 #### 最低要件
 
-- `task = "MetaGen"`
+- `task = "MIDI2Meta"`
 - `conditions_midi`
 
 #### 禁止条件
@@ -320,22 +317,22 @@ Body なし。
 
 対応:
 
-- `Prompt2MIDI`
+- `Meta2MIDI`
 - `Chord2MIDI`
 - `MIDI2Chord`
-- `MetaGen`
+- `MIDI2Meta`
 
 ### `tag.model == "generation"`
 
 対応:
 
-- `Prompt2MIDI`
+- `Meta2MIDI`
 - `Chord2MIDI`
 
 非対応:
 
 - `MIDI2Chord`
-- `MetaGen`
+- `MIDI2Meta`
 
 ---
 
@@ -439,7 +436,7 @@ curl -X POST "http://localhost:8000/generate" \
   "model_type": "MORTM4.5D-Lite",
   "program": ["PIANO"],
   "tempo": 120,
-  "task": "Prompt2MIDI",
+  "task": "Meta2MIDI",
   "key": "CM",
   "genfield_measure": 8,
   "gen_note_dense": {"PIANO": 4},
@@ -470,7 +467,7 @@ curl -X POST "http://localhost:8000/generate" \
 ```bash
 curl -X POST "http://localhost:8000/generate" \
   -F "conditions_midi=@input.mid" \
-  -F "meta_json=@meta_metagen.json;type=application/json"
+  -F "meta_json=@meta_midi2meta.json;type=application/json"
 ```
 
 ---

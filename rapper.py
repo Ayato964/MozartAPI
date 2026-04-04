@@ -8,7 +8,7 @@ class GenerateMeta(BaseModel):
     model_type: str
     program: List[Union[str, int]]
     tempo: int
-    task: str = "Prompt2MIDI"
+    task: str = "Meta2MIDI"
     key: Optional[str] = None
 
     num_gems: int = 1

@@ -3,6 +3,7 @@
   "description": "ピアノやサックスを含む多様な楽器の演奏に対応したMORTM4.5モデルの軽量版です。高速な生成を実現しています。",
   "tag": {
     "instruments":[ "PIANO", "SAX"],
+    "task": ["Meta2MIDI"],
     "model": "pretrained",
     "type": "mortm",
     "version": "4.5"
@@ -18,6 +19,7 @@
     "send_context_future": false,
     "send_chord_progression": false,
     "gen_measure_count": false,
-    "gen_note_dense": false
+    "gen_note_dense": true,
+    "send_chord": false
   }
 }

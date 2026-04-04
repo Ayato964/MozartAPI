@@ -20,12 +20,14 @@ from mortm.utils.de_convert import ct_token_to_midi
 
 
 _TASK_ALIASES = {
-    "prompt2midi": "Prompt2MIDI",
-    "generate": "Prompt2MIDI",
-    "melodygen": "Prompt2MIDI",
+    "meta2midi": "Meta2MIDI",
+    "prompt2midi": "Meta2MIDI",
+    "generate": "Meta2MIDI",
+    "melodygen": "Meta2MIDI",
     "chord2midi": "Chord2MIDI",
     "midi2chord": "MIDI2Chord",
-    "metagen": "MetaGen",
+    "midi2meta": "MIDI2Meta",
+    "metagen": "MIDI2Meta",
 }
 
 
@@ -56,7 +58,7 @@ class MORTM45Rapper(AbstractModelRapper):
     @staticmethod
     def _normalize_task(task: Optional[str]) -> str:
         if task is None:
-            return "Prompt2MIDI"
+            return "Meta2MIDI"
         key = "".join(ch for ch in task if ch.isalnum()).lower()
         if key not in _TASK_ALIASES:
             raise ValueError(f"Unsupported task: {task}")
@@ -329,11 +331,11 @@ class MORTM45Rapper(AbstractModelRapper):
     ) -> np.ndarray:
         task = self._normalize_task(meta.task)
 
-        if task == "MetaGen":
+        if task == "MIDI2Meta":
             if const_midi is None:
-                raise ValueError("MetaGen では conditions_midi が必須です")
+                raise ValueError("MIDI2Meta では conditions_midi が必須です")
             if past_midi is not None or future_midi is not None or meta.chord_item is not None:
-                raise ValueError("MetaGen は conditions_midi のみ対応です")
+                raise ValueError("MIDI2Meta は conditions_midi のみ対応です")
 
             prompt = np.asarray([tokenizer.get("<EOS>")], dtype=np.int64)
             const_seq = self._build_midi_context(
@@ -380,7 +382,7 @@ class MORTM45Rapper(AbstractModelRapper):
         start_token = "<CGEN>" if task == "MIDI2Chord" else "<MGEN>"
         prompt = np.concatenate([prompt, np.asarray([tokenizer.get(start_token)], dtype=np.int64)])
 
-        if task == "Prompt2MIDI" and meta.ai_continue_mode:
+        if task == "Meta2MIDI" and meta.ai_continue_mode:
             if past_midi is None:
                 raise ValueError("ai_continue_mode=True の場合は past_midi が必要です")
             node_dict = self._load_midi_node_dict(tokenizer, past_midi, program_names, meta.key)
@@ -420,7 +422,7 @@ class MORTM45Rapper(AbstractModelRapper):
             }
 
         if model_tag == "generation":
-            if task in {"MIDI2Chord", "MetaGen"}:
+            if task in {"MIDI2Chord", "MIDI2Meta"}:
                 raise ValueError(f"{self.meta['model_name']} は {task} をサポートしていません")
             if meta.ai_continue_mode:
                 raise ValueError("generation タグのモデルでは ai_continue_mode は未対応です")
@@ -551,7 +553,7 @@ class MORTM45Rapper(AbstractModelRapper):
         task: str = kwargs["task"]
         sequence = kwargs["sequence"]
 
-        if task == "MetaGen":
+        if task == "MIDI2Meta":
             generated = self._sample_meta_sequences(
                 tokenizer,
                 sequence,
@@ -614,7 +616,7 @@ class MORTM45Rapper(AbstractModelRapper):
         for i in range(len(full_sequences)):
             if task == "MIDI2Chord":
                 outputs.append(self._parse_chords(tokenizer, generated_parts[i], meta.tempo))
-            elif task == "MetaGen":
+            elif task == "MIDI2Meta":
                 outputs.append(self._parse_metadata(tokenizer, generated_parts[i]))
             else:
                 if meta.ai_continue_mode:

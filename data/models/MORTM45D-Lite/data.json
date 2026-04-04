@@ -3,6 +3,7 @@
   "description": "ピアノやサックスを含む多彩な楽器編成に対応したMORTM4.5の基盤モデルです。旋律生成、コード進行の生成、コード進行から旋律の生成、メタ情報の推論をはじめとした理解タスクと生成タスクに優れています。",
   "tag": {
     "instruments":["PIANO", "SAX"],
+    "task": ["Meta2MIDI", "MIDI2Meta", "Chord2MIDI", "MIDI2Chord"],
     "model": "pretrained",
     "type": "mortm",
     "version": "4.5D"
@@ -18,6 +19,7 @@
     "send_context_future": false,
     "send_chord_progression": false,
     "gen_measure_count": true,
-    "gen_note_dense": true
+    "gen_note_dense": true,
+    "send_chord": true
   }
 }
