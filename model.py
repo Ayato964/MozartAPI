@@ -62,6 +62,7 @@ class ModelController:
         self.rapper_factory.register_rapper("MORTM4.5-Flash-Preview2", MORTM45Rapper)
         self.rapper_factory.register_rapper("MORTM4.5-Pro-Preview2", MORTM45Rapper)
         self.rapper_factory.register_rapper("MORTM4.5D-Lite", MORTM45Rapper)
+        self.rapper_factory.register_rapper("MORTM4.5E-Flash-Lite", MORTM45Rapper)
 
     def _scan_model_folders(self, base_dir="data/models"):
         if not os.path.isdir(base_dir):
