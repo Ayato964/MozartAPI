@@ -20,6 +20,15 @@ class GenerateMeta(BaseModel):
     chord_times: Optional[List[float]] = None
     split_measure: int = 999
     ai_continue_mode: bool = False
+    # MORTM4.5D-80M-SFT-Gen 用 (任意): ジャンル指定。未対応モデルでは無視される。
+    genre: Optional[List[str]] = None
+    # MORTM4.5D-80M-SFT-Gen 用 (任意): CoT(<thinking>)の有効/無効。
+    #   True  -> <MGEN> 直後にモデルがフルメタを「考えて」から生成。reason に予測メタを返す。
+    #   False -> CoT なし (thinking のない学習パターン)。reason は null。
+    thinking: bool = True
+    # MORTM4.5D-80M-SFT-Gen 用 (任意): CoT(思考=メタ予測)部のサンプリング温度。
+    #   <SYSTEM> 〜 <TAG_END> の間はこの低温で安定させ、その後 temperature に戻す。
+    cot_temperature: float = 0.1
 
     @model_validator(mode="after")
     def validate_values(self):

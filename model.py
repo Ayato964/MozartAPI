@@ -15,6 +15,7 @@ except ImportError:
 
 from rapper import GenerateMeta, ModelRapperFactory
 from models.mortm.mortm45 import MORTM45Rapper
+from models.mortm.mortm45d import MORTM45DRapper
 
 
 class ModelController:
@@ -32,10 +33,10 @@ class ModelController:
         print(self.meta)
 
         self.loaded_rappers = OrderedDict()
-        self.max_cache_size = cache_size
+        self.max_cache_size = int(os.environ.get("MOZART_CACHE_SIZE", "1"))
         self.model_locks = {}
 
-        self.vram_threshold = vram_threshold
+        self.vram_threshold = float(os.environ.get("MOZART_VRAM_THRESHOLD", "0.5"))
         if PYNVML_AVAILABLE:
             try:
                 pynvml.nvmlInit()
@@ -57,12 +58,16 @@ class ModelController:
         return "".join(ch for ch in name.lower() if ch.isalnum())
 
     def _register_rappers(self):
+        # 従来モデル (pretrained): <MGEN> -> <TE> 形式
         self.rapper_factory.register_rapper("MORTM4.5-Flash-Preview", MORTM45Rapper)
         self.rapper_factory.register_rapper("MORTM4.5-Pro-Preview", MORTM45Rapper)
         self.rapper_factory.register_rapper("MORTM4.5-Flash-Preview2", MORTM45Rapper)
         self.rapper_factory.register_rapper("MORTM4.5-Pro-Preview2", MORTM45Rapper)
-        self.rapper_factory.register_rapper("MORTM4.5D-Lite", MORTM45Rapper)
-        self.rapper_factory.register_rapper("MORTM4.5E-Flash-Lite", MORTM45Rapper)
+        # 新モデル: 基盤(foundation, EOS生成) と 生成SFT(sft_gen, <MGEN>->​<TE>)
+        self.rapper_factory.register_rapper("MORTM4.5D-80M", MORTM45DRapper)
+        self.rapper_factory.register_rapper("MORTM4.5D-80M-SFT-Gen", MORTM45DRapper)
+        # 160M 生成SFT (80M の完全上位互換・スケールアップ。処理は 80M と同一)
+        self.rapper_factory.register_rapper("MORTM4.5D-160M-SFT-Gen", MORTM45DRapper)
 
     def _scan_model_folders(self, base_dir="data/models"):
         if not os.path.isdir(base_dir):
@@ -156,10 +161,17 @@ class ModelController:
 
         final_output_path = None
         is_json_result = False
-        async with lock:
+        reason = None
+
+        def _run_blocking():
+            # 同期(GPUブロッキング)処理。イベントループを固めないようスレッドで実行する。
             kwargs = rapper.preprocessing(past_midi_path, const_midi_path, future_midi_path, meta)
             generated_data_kwargs = rapper.generate(**kwargs)
-            output_paths = rapper.postprocessing(save_directory, **generated_data_kwargs)
+            paths = rapper.postprocessing(save_directory, **generated_data_kwargs)
+            return paths, getattr(rapper, "last_reason", None)
+
+        async with lock:
+            output_paths, reason = await asyncio.to_thread(_run_blocking)
 
             if isinstance(output_paths, list) and len(output_paths) > 0:
                 if isinstance(output_paths[0], (dict, list)):
@@ -179,10 +191,19 @@ class ModelController:
             else:
                 final_output_path = output_paths
 
+        gc.collect()
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except ImportError:
+            pass
+
         return {
             "result": "success",
             "model_type": resolved_model_type,
             "save_path": str(save_directory),
             "output_file": final_output_path,
             "is_json_result": is_json_result,
+            "reason": reason,
         }

@@ -1,9 +1,9 @@
 {
   "vocab_size": 700,
   "d_model": 768,
-  "dim_feedforward": 1536,
+  "dim_feedforward": 2048,
   "num_heads": 12,
-  "d_layer": 14,
+  "d_layer": 11,
   "dropout": 0.2,
   "position_length": 5000,
   "min_length": 40,
@@ -13,9 +13,14 @@
   "topk_groups": 1,
   "use_moe_encoder": false,
   "use_moe_decoder": false,
+  "debug_attention": true,
   "norm_type": "rmsnorm",
   "use_silu": true,
   "use_bias": false,
-  "use_rope": true
+  "use_rope": true,
+  "use_attn_lora": true,
+  "use_ffn_lora": true,
+  "lora_r": 4,
+  "lora_alpha": 8
 
 }

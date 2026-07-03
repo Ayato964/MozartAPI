@@ -33,20 +33,27 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-origins = [
-    "http://localhost",
-    "http://localhost:3000",
-    "http://localhost:8080",
-    "https://ayato964.github.io",
-]
-
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
-    allow_credentials=True,
+    # 任意のフロントエンドからのアクセスを許可する (Cookie 認証は使わないため * + credentials=False)
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
+    # ブラウザ JS から reason ヘッダを読めるように公開する
+    expose_headers=["X-Generation-Reason"],
 )
+
+
+def _reason_header(reason) -> dict:
+    """reason を HTTP ヘッダ安全な形 (URL エンコード JSON) にする。"""
+    if reason is None:
+        return {}
+    try:
+        from urllib.parse import quote
+        return {"X-Generation-Reason": quote(json.dumps(reason, ensure_ascii=False))}
+    except Exception:
+        return {}
 
 
 async def midi_save(upload: UploadFile, save_path: Path, save_name: str) -> str:
@@ -81,9 +88,11 @@ async def generate(
             )
         conditions_midi = midi
 
+    _ts = datetime.now().strftime("%H:%M:%S")
     print(
-        f"Input: past={past_midi is not None}, cond={conditions_midi is not None}, "
-        f"future={future_midi is not None}, meta={meta_json.filename}"
+        f"[{_ts}] /generate RECEIVED: past={past_midi is not None}, cond={conditions_midi is not None}, "
+        f"future={future_midi is not None}, meta={meta_json.filename}",
+        flush=True,
     )
 
     allowed_midi_types = {
@@ -158,11 +167,13 @@ async def generate(
 
         output_file_path = result.get("output_file")
         is_json_result = result.get("is_json_result", False)
+        reason = result.get("reason")
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] /generate DONE: output={output_file_path}", flush=True)
 
         if is_json_result and output_file_path and os.path.exists(output_file_path):
             with open(output_file_path, "r", encoding="utf-8") as f:
                 json_data = json.load(f)
-            return JSONResponse(content={"result": "success", "data": json_data})
+            return JSONResponse(content={"result": "success", "data": json_data, "reason": reason})
 
         if not output_file_path or not os.path.exists(output_file_path):
             return JSONResponse(
@@ -186,6 +197,7 @@ async def generate(
             path=output_file_path,
             media_type=media_type,
             filename=os.path.basename(output_file_path),
+            headers=_reason_header(reason),
         )
 
     except Exception as e:
